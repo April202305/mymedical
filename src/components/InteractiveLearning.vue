@@ -1,5 +1,6 @@
 <template>
   <div class="interactive-learning">
+    <back-to-home />
     <div class="learning-container">
       <div class="avatar-section">
         <VirtualAvatar />
@@ -54,11 +55,13 @@
 <script>
 import { ref, computed } from 'vue'
 import VirtualAvatar from './VirtualAvatar.vue'
+import BackToHome from './BackToHome.vue'
 
 export default {
   name: 'InteractiveLearning',
   components: {
-    VirtualAvatar
+    VirtualAvatar,
+    BackToHome
   },
   setup() {
     const currentQuestionIndex = ref(0)
@@ -123,8 +126,7 @@ export default {
 
 <style scoped>
 .interactive-learning {
-  width: 100%;
-  height: 100vh;
+  position: relative;
   padding: 20px;
 }
 

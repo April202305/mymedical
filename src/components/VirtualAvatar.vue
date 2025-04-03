@@ -9,9 +9,10 @@
 <script>
 import { onMounted, onUnmounted, ref } from 'vue'
 import * as THREE from 'three'
-import { GLTFLoader } from 'three/examples/jsm/loaders/GLTFLoader'
-import { OrbitControls } from 'three/examples/jsm/controls/OrbitControls'
+import { GLTFLoader } from 'three/examples/jsm/loaders/GLTFLoader.js'
+import { OrbitControls } from 'three/examples/jsm/controls/OrbitControls.js'
 import { VRMLoaderPlugin } from '@pixiv/three-vrm'
+import { TTSService } from '../services/ttsService'
 
 export default {
   name: 'VirtualAvatar',
@@ -23,50 +24,81 @@ export default {
     let vrm = null
     let animationFrame = null
     let clock = null
+    let audioContext = null
+    let analyser = null
+    let speaking = false
+    const ttsService = new TTSService()
 
-    // 添加动画状态
-    const animationState = {
-      breathingOffset: 0,
-      swayOffset: 0
+    // 添加说话功能
+    const speak = async (text) => {
+      try {
+        if (!vrm || !vrm.blendshape) return
+
+        // 创建音频上下文和分析器
+        audioContext = new (window.AudioContext || window.webkitAudioContext)()
+        analyser = audioContext.createAnalyser()
+        analyser.fftSize = 256
+
+        // 合成语音
+        const audioUrl = await ttsService.synthesize(text)
+        
+        // 加载音频文件
+        const response = await fetch(audioUrl)
+        const arrayBuffer = await response.arrayBuffer()
+        const audioBuffer = await audioContext.decodeAudioData(arrayBuffer)
+        
+        const source = audioContext.createBufferSource()
+        source.buffer = audioBuffer
+        source.connect(analyser)
+        source.connect(audioContext.destination)
+        
+        speaking = true
+        source.start(0)
+
+        // 开始口型动画
+        const animateMouth = () => {
+          if (!speaking) return
+
+          const dataArray = new Uint8Array(analyser.frequencyBinCount)
+          analyser.getByteFrequencyData(dataArray)
+          
+          // 计算音量
+          const average = dataArray.reduce((a, b) => a + b) / dataArray.length
+          const threshold = 10 // 音量阈值
+          
+          // 根据音量控制口型
+          if (average > threshold) {
+            vrm.blendshape.setValue('viseme_aa', 1.0) // 张嘴
+          } else {
+            vrm.blendshape.setValue('viseme_aa', 0.0) // 闭嘴
+          }
+
+          requestAnimationFrame(animateMouth)
+        }
+
+        animateMouth()
+
+        // 音频播放结束时停止说话
+        source.onended = () => {
+          speaking = false
+          vrm.blendshape.setValue('viseme_aa', 0.0)
+          URL.revokeObjectURL(audioUrl) // 释放音频URL
+        }
+      } catch (err) {
+        console.error('语音合成失败:', err)
+        error.value = '语音合成失败'
+      }
     }
 
-    // 呼吸动画函数
-    const updateBreathing = (deltaTime) => {
-      if (!vrm || !vrm.humanoid) return
-      
-      animationState.breathingOffset += deltaTime * 2
-      const breatheAmount = Math.sin(animationState.breathingOffset) * 0.03
-
-      // 上半身轻微上下移动
-      const chest = vrm.humanoid.getNormalizedBoneNode('chest')
-      if (chest) {
-        chest.position.y = breatheAmount
+    // 停止说话
+    const stopSpeaking = () => {
+      speaking = false
+      if (audioContext) {
+        audioContext.close()
+        audioContext = null
       }
-
-      // 头部轻微跟随
-      const neck = vrm.humanoid.getNormalizedBoneNode('neck')
-      if (neck) {
-        neck.rotation.x = breatheAmount * 0.1
-      }
-    }
-
-    // 身体摆动动画
-    const updateSwaying = (deltaTime) => {
-      if (!vrm || !vrm.humanoid) return
-
-      animationState.swayOffset += deltaTime
-      const swayAmount = Math.sin(animationState.swayOffset) * 0.02
-
-      // 整体轻微左右摆动
-      const hips = vrm.humanoid.getNormalizedBoneNode('hips')
-      if (hips) {
-        hips.rotation.y = swayAmount
-      }
-
-      // 头部轻微跟随
-      const head = vrm.humanoid.getNormalizedBoneNode('head')
-      if (head) {
-        head.rotation.z = -swayAmount * 0.2
+      if (vrm && vrm.blendshape) {
+        vrm.blendshape.setValue('viseme_aa', 0.0)
       }
     }
 
@@ -93,83 +125,90 @@ export default {
         renderer.setSize(avatarCanvas.value.clientWidth, avatarCanvas.value.clientHeight)
         renderer.setPixelRatio(window.devicePixelRatio)
 
-        // 添加轨道控制器
+        // 创建控制器
         controls = new OrbitControls(camera, renderer.domElement)
         controls.enableDamping = true
-        controls.dampingFactor = 0.05
-        controls.minDistance = 1.0
-        controls.maxDistance = 3.0
-        controls.minPolarAngle = Math.PI / 4
-        controls.maxPolarAngle = Math.PI / 1.5
         controls.target.set(0, 1.2, 0)
 
-        // 添加灯光
+        // 添加光源
         const light = new THREE.DirectionalLight(0xffffff, 1)
         light.position.set(1, 1, 1)
         scene.add(light)
         scene.add(new THREE.AmbientLight(0xffffff, 0.5))
 
-        // 加载 VRM 模型
+        // 创建加载器
         const loader = new GLTFLoader()
-        loader.register((parser) => new VRMLoaderPlugin(parser))
+        const plugin = new VRMLoaderPlugin()
+        loader.register(() => plugin)
         
         clock = new THREE.Clock()
         
+        // 加载模型
         loader.load(
           '/models/虚拟数字人.vrm',
           (gltf) => {
-            const vrmData = gltf.userData.vrm
-            if (vrmData) {
-              vrm = vrmData
-              vrm.scene = gltf.scene
-              vrm.scene.rotation.y = Math.PI
-              vrm.scene.scale.set(1.2, 1.2, 1.2)
-              scene.add(vrm.scene)
-              loading.value = false
+            try {
+              const vrmData = gltf.userData.vrm
+              if (vrmData) {
+                vrm = vrmData
+                scene.add(vrm.scene)
+                vrm.scene.rotation.y = Math.PI
+                vrm.scene.scale.set(1.2, 1.2, 1.2)
 
-              // 更新动画循环
-              const animate = () => {
-                const deltaTime = clock.getDelta()
-                
-                if (vrm) {
-                  // 更新 VRM
-                  vrm.update(deltaTime)
-                  
-                  // 更新自定义动画
-                  updateBreathing(deltaTime)
-                  updateSwaying(deltaTime)
+                // 设置手臂自然下垂
+                if (vrm.humanoid) {
+                  const leftArm = vrm.humanoid.getNormalizedBoneNode('leftUpperArm')
+                  const rightArm = vrm.humanoid.getNormalizedBoneNode('rightUpperArm')
+                  if (leftArm) {
+                    leftArm.rotation.set(0, 0, 20)
+                  }
+                  if (rightArm) {
+                    rightArm.rotation.set(0, 0, -20)
+                  }
                 }
-                
-                controls.update()
-                renderer.render(scene, camera)
-                animationFrame = requestAnimationFrame(animate)
-              }
 
-              animate()
-            } else {
-              error.value = 'VRM 模型加载失败'
+                loading.value = false
+
+                // 动画循环
+                const animate = () => {
+                  const deltaTime = clock.getDelta()
+                  
+                  if (vrm) {
+                    vrm.update(deltaTime)
+                  }
+                  
+                  controls.update()
+                  renderer.render(scene, camera)
+                  animationFrame = requestAnimationFrame(animate)
+                }
+
+                animate()
+              } else {
+                error.value = 'VRM模型加载失败'
+                loading.value = false
+              }
+            } catch (err) {
+              error.value = 'VRM处理失败: ' + err.message
               loading.value = false
+              console.error(err)
             }
           },
-          (progress) => {
-            console.log('Loading progress:', (progress.loaded / progress.total * 100) + '%')
-          },
+          undefined,
           (err) => {
+            error.value = '模型加载失败: ' + err.message
             loading.value = false
-            error.value = '模型加载失败，请检查文件路径'
-            console.error('模型加载错误:', err)
+            console.error(err)
           }
         )
       } catch (err) {
-        loading.value = false
         error.value = '初始化失败: ' + err.message
-        console.error('初始化错误:', err)
+        loading.value = false
+        console.error(err)
       }
     }
 
-    // 处理窗口大小变化
     const handleResize = () => {
-      if (!avatarCanvas.value) return
+      if (!avatarCanvas.value || !camera || !renderer) return
       
       const width = avatarCanvas.value.clientWidth
       const height = avatarCanvas.value.clientHeight
@@ -179,15 +218,11 @@ export default {
       renderer.setSize(width, height)
     }
 
-    // 组件挂载时初始化
     onMounted(() => {
-      setTimeout(() => {
-        initAvatar()
-      }, 0)
+      setTimeout(initAvatar, 0)
       window.addEventListener('resize', handleResize)
     })
 
-    // 组件卸载时清理
     onUnmounted(() => {
       if (animationFrame) {
         cancelAnimationFrame(animationFrame)
@@ -196,25 +231,27 @@ export default {
       if (renderer) {
         renderer.dispose()
       }
+      if (audioContext) {
+        audioContext.close()
+      }
     })
 
     return {
       avatarCanvas,
       loading,
-      error
+      error,
+      speak,
+      stopSpeaking
     }
   }
 }
+
 </script>
 
 <style scoped>
 .avatar-container {
   width: 100%;
   height: 100%;
-  min-height: 600px;
-  display: flex;
-  justify-content: center;
-  align-items: center;
   position: relative;
   background-color: #f5f5f5;
   border-radius: 8px;
